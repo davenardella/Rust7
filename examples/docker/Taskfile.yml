@@ -1,0 +1,58 @@
+version: "3"
+
+vars:
+  BINARY_NAME: app
+
+tasks:
+  default:
+    desc: Show available tasks
+    cmds:
+      - task --list
+
+  build:
+    desc: Build the Rust project
+    cmds:
+      - echo "Building Rust project..."
+      - cargo build
+    silent: false
+
+  run:
+    desc: Run the Rust project
+    cmds:
+      - echo "Running Rust project..."
+      - RUST_BACKTRACE=full cargo run
+    silent: false
+
+  build-release:
+    desc: Build the Rust project in release mode
+    cmds:
+      - echo "Building Rust project (release)..."
+      - cargo build --release
+    silent: false
+
+  docker-up:
+    desc: Start services using Docker Compose
+    cmds:
+      - echo "Starting Docker Compose..."
+      - docker compose up --build
+    silent: false
+
+  docker-up-detached:
+    desc: Start Docker Compose in detached mode
+    cmds:
+      - echo "Starting Docker Compose in detached mode..."
+      - docker compose up -d --build
+    silent: false
+
+  docker-down:
+    desc: Stop Docker Compose services
+    cmds:
+      - echo "Stopping Docker Compose..."
+      - docker compose down
+    silent: false
+
+  dev:
+    desc: Build and run Rust project (development flow)
+    deps: [build]
+    cmds:
+      - task run

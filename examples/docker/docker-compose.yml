@@ -1,0 +1,10 @@
+services:
+  soft-plc:
+    container_name: soft-plc
+    image: fbarresi/softplc:latest-linux
+    ports:
+      - "102:102" # Siemens S7 TCP/IP Port
+      - "8080:8080" # HTTP Port for the OpenAPI Docs
+      - "8443:443" # HTTPS Port for the OpenAPI Docs
+    environment:
+      - DATA_PATH=/demodata
