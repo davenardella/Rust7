@@ -126,7 +126,9 @@ docker --version
 
 4.  Verify in PowerShell:
 
+```shell
 docker --version
+```
 
 * * * * *
 
