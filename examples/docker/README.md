@@ -13,6 +13,29 @@ This guide explains:
 
 * * * * *
 
+Quick Start
+===================================
+
+1. Start the PLC in Docker:
+
+```shell
+docker compose up -d
+```
+
+2. Create a second Datablock beside the default Datablock:
+
+```shell
+curl -X 'POST' \
+  'http://localhost:8080/api/DataBlocks?id=2&size=1024' \
+  -H 'accept: */*' \
+  -d ''
+```
+
+3. Run the Rust examples:
+```shell
+task run
+```
+
 1\. Installing Docker
 =====================
 
