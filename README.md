@@ -48,9 +48,12 @@ fn main() {
 ## Documentation
 The detailed documentation is <a href="doc/Documentation.md" target="_blank">here</a>.
 
+## Examples
+For practical examples see the documentation <a href="examples/README.md" target="_blank">here</a>.
+
 ---
 
 ## License
 Copyright © 2025 Davide Nardella
 
-Distribuited under <a href="LICENSE" target="_blank">MIT License</a>. 
+Distribuited under <a href="LICENSE" target="_blank">MIT License</a>.
