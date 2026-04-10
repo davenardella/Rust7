@@ -116,6 +116,15 @@ impl fmt::Display for S7Error {
     }
 }
 
+impl std::error::Error for S7Error {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Io(e) => Some(e),
+            _ => None,
+        }
+    }
+}
+
 impl From<io::Error> for S7Error {
     fn from(err: io::Error) -> S7Error {
         S7Error::Io(err)
