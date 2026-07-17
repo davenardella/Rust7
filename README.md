@@ -11,7 +11,7 @@ Pragmatic native Rust S7 client (Snap7‑style) for Siemens PLCs.
 - Connection helpers for S7-1200/1500, S7-300, and rack/slot-based PLCs.
 - SZL (System Status List) reads: raw `read_szl`, structured `read_cpu_info`, and `read_diagnostic_buffer`.
 - Diagnostic event ID lookup: `describe_event` maps any `event_id` to a human-readable class and name.
-- CPU-family-aware `read_cycle_time`: works on S7-1200/1500 via SZL; returns a clear `S7Error::UnsupportedCpuFamily` on S7-300/400, which expose no cycle-time SZL.
+- CPU-family-aware `read_cycle_time`: SZL-based on S7-1200/1500; on S7-300/400 (which expose no cycle-time SZL) it attempts an **experimental**, hardware-unverified TIS `TIMEMEAS` path — see `docs/protocol/tis-timemeas.md`.
 
 ---
 

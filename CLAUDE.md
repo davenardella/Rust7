@@ -139,11 +139,13 @@ Do not introduce new doc-test failures.
 
 | File | Lines | Role |
 |---|---|---|
-| `src/lib.rs` | 37 | Crate entry. `#![forbid(unsafe_code)]`, embeds README as crate docs, re-exports public surface. Add nothing here without adding to `src/client.rs` first. |
-| `src/client.rs` | 1735 | All implementation: constants, macros, `S7Error`, `CpuFamily`, `S7Client`. The full protocol stack. |
+| `src/lib.rs` | 38 | Crate entry. `#![forbid(unsafe_code)]`, embeds README as crate docs, re-exports public surface. Add nothing here without adding to `src/client.rs` first. |
+| `src/client.rs` | 1802 | All implementation: constants, macros, `S7Error`, `CpuFamily`, `S7Client`. The full protocol stack. |
+| `src/tis.rs` | 147 | **Experimental**, crate-internal. TIS `TIMEMEAS` userdata subfunction — S7-300/400 cycle-time reads. Unverified against real hardware; see `docs/protocol/tis-timemeas.md`. |
 | `src/diag_events.rs` | — | Diagnostic event ID lookup tables (557 entries) and `describe_event(u16) -> DiagEventInfo`. Derived from the Wireshark S7Comm dissector. |
 | `Cargo.toml` | 22 | Zero `[dependencies]`. `[lib]` points to `src/lib.rs`. `[dev-dependencies]` has testcontainers. |
 | `doc/Documentation.md` | 778 | Full API reference. Canonical source of truth for method semantics, parameters, and error codes. |
+| `docs/protocol/tis-timemeas.md` | — | Original protocol write-up for TIS `TIMEMEAS`, citing the Wireshark dissector and Apache PLC4X `s7.mspec`. Documents what's verified vs. guessed. |
 | `examples/docker/main.rs` | 187 | Standalone binary (separate crate) demonstrating read/write/bit ops against SoftPLC. |
 | `examples/docker/docker-compose.yml` | 10 | Launches SoftPLC on port 102 (S7) and 8080 (REST). |
 | `examples/docker/Taskfile.yml` | 58 | Task runner. Key tasks: `build`, `run`, `docker-up`, `docker-down`, `dev`. |
@@ -441,4 +443,4 @@ Use Wireshark with the `s7comm` dissector (built into recent Wireshark versions)
 
 ## Protocol Validator Sub-Agent
 
-When making changes to byte-level telegram construction in `connect_tsap`, `read_area`, or `write_area`, or when adding protocol offset constants or memory area/word-length constants — invoke the protocol validator sub-agent at `.claude/agents/protocol-validator.md`. It reads the code and produces a field-by-field PASS/FAIL validation report. It makes no edits.
+When making changes to byte-level telegram construction in `connect_tsap`, `read_area`, `write_area`, the shared userdata envelope (`build_userdata_request`, `read_userdata_response`), or `src/tis.rs`, or when adding protocol offset constants or memory area/word-length constants — invoke the protocol validator sub-agent at `.claude/agents/protocol-validator.md`. It reads the code and produces a field-by-field PASS/FAIL validation report. It makes no edits.

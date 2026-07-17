@@ -733,7 +733,18 @@ pub fn read_cycle_time(&mut self) -> Result<CycleTimeInfo, S7Error>
 
 Returns a `CycleTimeInfo` with the OB1 execution count and the minimum, maximum, and most-recent cycle times in milliseconds.
 
-On S7-1200/1500 this reads SZL `0x0194` directly. **S7-300/400 expose no SZL containing OB1 cycle-time statistics** — the method dispatches on the connected CPU family (see below) and returns `S7Error::UnsupportedCpuFamily` on those families instead of attempting the SZL read.
+On S7-1200/1500 this reads SZL `0x0194` directly. **S7-300/400 expose no SZL containing OB1 cycle-time statistics** — the method dispatches on the connected CPU family (see below) and, on those families, attempts a read via the TIS `TIMEMEAS` userdata subfunction instead.
+
+#### ⚠ Experimental on S7-300/400
+The TIS path is **unverified against real hardware** — see
+[`docs/protocol/tis-timemeas.md`](../docs/protocol/tis-timemeas.md). No known open-source S7
+client implements `TIMEMEAS`, and the Wireshark s7comm dissector itself has "never seen" one on
+the wire, so the request parameters and response layout are documented best-effort guesses. A
+PLC-level rejection surfaces as a typed error (never a fabricated result), but a response the
+PLC *accepts* may still decode into a `CycleTimeInfo` that does not actually represent
+cycle-time statistics. Treat any S7-300/400 result as provisional until confirmed against a
+physical CPU; a PLC-side DB-publish remains the recommended production approach for these
+families (see the spec doc's "Recommended production alternative").
 
 #### CPU family detection
 The family is resolved in this order:
@@ -743,15 +754,18 @@ The family is resolved in this order:
 
 #### Notes
 - The PLC must be in RUN mode for meaningful data. In STOP mode all time fields may be zero.
-- `fbarresi/softplc` does not support SZL `0x0194`.
+- `fbarresi/softplc` does not support SZL `0x0194`, nor TIS `TIMEMEAS`.
 
 #### Returns
 `Ok(CycleTimeInfo)`.
 
 #### Errors
-Same as `read_szl()`.
-Returns `S7Error::IsoInvalidTelegram` if the SZL payload is shorter than 18 bytes.
-Returns `S7Error::UnsupportedCpuFamily` on S7-300/400: SZL `0x0194` is S7-1200/1500 only. Use a PLC-side DB-publish for cycle-time monitoring on S7-300/400 until a TIS TIMEMEAS-based path is available.
+On S7-1200/1500: same as `read_szl()`. Returns `S7Error::IsoInvalidTelegram` if the SZL payload
+is shorter than 18 bytes.
+On S7-300/400 (TIS path): `S7Error::NotConnected` if not connected; `S7Error::SzlReadFailed` if
+the PLC returns a non-success data return code for the TIS request; `S7Error::IsoInvalidTelegram`
+if the response is malformed or shorter than the expected minimum length; other low-level
+errors (`S7Error::Io`, `S7Error::Iso*`) as for any network operation.
 
 ---
 ## Diagnostic event ID lookup
