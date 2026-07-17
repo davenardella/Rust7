@@ -23,3 +23,9 @@ fn last_time_zero() {
     let client = S7Client::new();
     assert_eq!(client.last_time, 0.0);
 }
+
+#[test]
+fn connect_profile_starts_unset() {
+    let client = S7Client::new();
+    assert_eq!(client.connect_profile, None);
+}

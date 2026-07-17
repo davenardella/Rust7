@@ -2,7 +2,10 @@
 use super::super::{
     build_szl_first_request, build_szl_next_request, parse_bcd_timestamp, SZL_REQ_LEN,
 };
-use crate::{CpuInfo, CycleTimeInfo, S7Client, S7DateTime, S7Error, Szl, SzlHeader, WorkMemoryRecord};
+use crate::{
+    CpuFamily, CpuInfo, CycleTimeInfo, S7Client, S7DateTime, S7Error, Szl, SzlHeader,
+    WorkMemoryRecord,
+};
 
 // ── read_szl guard tests ─────────────────────────────────────────────────────
 
@@ -18,6 +21,47 @@ fn read_work_memory_not_connected() {
 #[test]
 fn read_cycle_time_not_connected() {
     let mut c = S7Client::new();
+    assert!(matches!(c.read_cycle_time(), Err(S7Error::NotConnected)));
+}
+
+// ── read_cycle_time CPU-family dispatch (exercised without a network connection) ──
+
+#[test]
+fn read_cycle_time_s7300_profile_returns_unsupported_cpu_family() {
+    let mut c = S7Client::new();
+    c.connect_profile = Some(CpuFamily::S7300);
+    assert!(matches!(
+        c.read_cycle_time(),
+        Err(S7Error::UnsupportedCpuFamily { .. })
+    ));
+}
+
+#[test]
+fn read_cycle_time_s7400_profile_returns_unsupported_cpu_family() {
+    let mut c = S7Client::new();
+    c.connect_profile = Some(CpuFamily::S7400);
+    assert!(matches!(
+        c.read_cycle_time(),
+        Err(S7Error::UnsupportedCpuFamily { .. })
+    ));
+}
+
+#[test]
+fn read_cycle_time_s71200_1500_profile_reaches_szl_path() {
+    // Explicit 1200/1500 profile skips the family-dispatch error entirely and falls
+    // through to the (unchanged) SZL read, which fails with NotConnected — not
+    // UnsupportedCpuFamily — because no real connection was made.
+    let mut c = S7Client::new();
+    c.connect_profile = Some(CpuFamily::S71200_1500);
+    assert!(matches!(c.read_cycle_time(), Err(S7Error::NotConnected)));
+}
+
+#[test]
+fn read_cycle_time_other_profile_reaches_szl_path() {
+    // `Other` (e.g. via connect_rack_slot with no CPU-info fallback available) preserves
+    // the pre-existing SZL 0x0194 behaviour rather than rejecting the call outright.
+    let mut c = S7Client::new();
+    c.connect_profile = Some(CpuFamily::Other);
     assert!(matches!(c.read_cycle_time(), Err(S7Error::NotConnected)));
 }
 

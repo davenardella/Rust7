@@ -77,3 +77,14 @@ fn other_passthrough() {
     let msg = "custom error text";
     assert_eq!(display(&S7Error::Other(msg.to_string())), msg);
 }
+
+#[test]
+fn unsupported_cpu_family_includes_family_and_feature() {
+    let err = S7Error::UnsupportedCpuFamily {
+        family: "S7-300/400",
+        feature: "read_cycle_time()",
+    };
+    let msg = display(&err);
+    assert!(msg.contains("S7-300/400"));
+    assert!(msg.contains("read_cycle_time()"));
+}

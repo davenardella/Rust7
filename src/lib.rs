@@ -5,6 +5,7 @@ pub mod client;
 mod diag_events;
 
 pub use client::{
+    CpuFamily,
     CpuInfo,
     CycleTimeInfo,
     DiagnosticEntry,

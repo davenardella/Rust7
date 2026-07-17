@@ -106,6 +106,28 @@ macro_rules! make_u16 {
     };
 }
 
+/// CPU family recorded by a `connect_*` helper, used to select the correct
+/// mechanism for family-specific features (e.g. cycle-time reads).
+///
+/// Set automatically by [`S7Client::connect_s71200_1500`] and
+/// [`S7Client::connect_s7300`]. Connections made via [`S7Client::connect_rack_slot`]
+/// or [`S7Client::connect_tsap`] leave it as `Other`, since the family cannot be
+/// inferred from a bare rack/slot or TSAP pair.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CpuFamily {
+    /// S7-1200 or S7-1500 (connected via [`S7Client::connect_s71200_1500`]).
+    S71200_1500,
+    /// S7-300 (connected via [`S7Client::connect_s7300`]).
+    S7300,
+    /// S7-400. No dedicated `connect_s7400()` helper exists (use
+    /// [`S7Client::connect_rack_slot`]), so this is never set automatically —
+    /// it is only produced by CPU-model-string fallback detection.
+    S7400,
+    /// Family not distinguishable at connect time (e.g. via [`S7Client::connect_rack_slot`]
+    /// or [`S7Client::connect_tsap`]) and not resolved by fallback detection.
+    Other,
+}
+
 /// Errors returned by [`S7Client`] operations.
 ///
 /// **Low-level errors** (`Io`, `Iso*`, `TcpConnectionFailed`, `ConnectionClosed`,
@@ -142,6 +164,14 @@ pub enum S7Error {
     S7Unspecified,
     /// SZL read returned a non-success data return code from the PLC.
     SzlReadFailed,
+    /// The requested feature is not available on the connected CPU family via the
+    /// attempted mechanism (e.g. cycle-time SZL reads on S7-300/400).
+    UnsupportedCpuFamily {
+        /// Human-readable name of the detected CPU family (e.g. `"S7-300/400"`).
+        family: &'static str,
+        /// Human-readable name of the feature that was requested.
+        feature: &'static str,
+    },
     /// Catch-all error with a descriptive message.
     Other(String),
 }
@@ -163,6 +193,9 @@ impl fmt::Display for S7Error {
             S7Error::S7InvalidAddress => write!(f, "S7 Invalid address"),
             S7Error::S7Unspecified => write!(f, "S7 unspecified error"),
             S7Error::SzlReadFailed => write!(f, "SZL read failed (non-success data return code)"),
+            S7Error::UnsupportedCpuFamily { family, feature } => {
+                write!(f, "{feature} (CPU family: {family})")
+            }
             S7Error::Other(msg) => write!(f, "{}", msg),
         }
     }
@@ -339,6 +372,14 @@ pub struct S7Client {
     /// Values above 1 mean the data was split across multiple S7 PDUs (auto-chunking).
     /// Useful for performance tuning; ignored in normal usage.
     pub chunks: usize,
+    /// CPU family recorded by the `connect_*` helper used for the current connection.
+    ///
+    /// `None` until a `connect_*` method is called. Set to `Some(CpuFamily::S71200_1500)` by
+    /// [`connect_s71200_1500`](S7Client::connect_s71200_1500), `Some(CpuFamily::S7300)` by
+    /// [`connect_s7300`](S7Client::connect_s7300), and `Some(CpuFamily::Other)` by
+    /// [`connect_rack_slot`](S7Client::connect_rack_slot) / [`connect_tsap`](S7Client::connect_tsap),
+    /// since the family cannot be inferred from a bare rack/slot or TSAP pair.
+    pub connect_profile: Option<CpuFamily>,
 }
 
 /// ### Checks the incoming ISO Packet coherence
@@ -524,6 +565,7 @@ impl S7Client {
             connected: false,
             last_time: 0.0,
             chunks: 0,
+            connect_profile: None,
         }
     }
 
@@ -649,7 +691,9 @@ impl S7Client {
     /// - `S7Error::Io`: network I/O error.
     ///
     pub fn connect_s71200_1500(&mut self, ip: &str) -> Result<(), S7Error> {
-        self.connect_rack_slot(ip, 0, 0)
+        self.connect_rack_slot(ip, 0, 0)?;
+        self.connect_profile = Some(CpuFamily::S71200_1500);
+        Ok(())
     }
 
     /// Connects to an S7-300 PLC (rack 0, slot 2).
@@ -661,7 +705,9 @@ impl S7Client {
     /// Same as [`connect_s71200_1500`](S7Client::connect_s71200_1500).
     ///
     pub fn connect_s7300(&mut self, ip: &str) -> Result<(), S7Error> {
-        self.connect_rack_slot(ip, 0, 2)
+        self.connect_rack_slot(ip, 0, 2)?;
+        self.connect_profile = Some(CpuFamily::S7300);
+        Ok(())
     }
 
     /// Connects to a PLC using an explicit rack and slot (for S7-400, WinAC, PLCSIM, Sinamics).
@@ -677,7 +723,9 @@ impl S7Client {
     pub fn connect_rack_slot(&mut self, ip: &str, rack: u16, slot: u16) -> Result<(), S7Error> {
         let local_tsap: u16 = 0x0100;
         let remote_tsap: u16 = (self.conn_type << 8) + (rack * 0x20) + slot;
-        self.connect_tsap(ip, local_tsap, remote_tsap)
+        self.connect_tsap(ip, local_tsap, remote_tsap)?;
+        self.connect_profile = Some(CpuFamily::Other);
+        Ok(())
     }
 
     /// Connects using explicit TSAP values — the lowest-level connection method.
@@ -704,6 +752,7 @@ impl S7Client {
     ) -> Result<(), S7Error> {
         self.connected = false;
         self.last_time = 0.0;
+        self.connect_profile = None;
         let start_time = Instant::now();
 
         let addr = format!("{}:{}", ip, self.port);
@@ -1596,10 +1645,40 @@ impl S7Client {
         Ok(records)
     }
 
-    /// ### Reads scan cycle time statistics from SZL `0x0194`.
+    /// Resolves the connected CPU's family for feature dispatch.
+    ///
+    /// Prefers the profile recorded by the `connect_*` helper ([`connect_profile`](S7Client::connect_profile)).
+    /// Falls back to a best-effort match against the CPU model string from SZL `0x001C`
+    /// ([`read_cpu_info`](S7Client::read_cpu_info)) when the profile is unset or ambiguous
+    /// (e.g. connected via [`connect_rack_slot`](S7Client::connect_rack_slot)). An explicit
+    /// profile always wins over the fallback — VIPA clones and CPs can report misleading
+    /// module strings.
+    fn resolve_cpu_family(&mut self) -> CpuFamily {
+        if let Some(family @ (CpuFamily::S71200_1500 | CpuFamily::S7300)) = self.connect_profile {
+            return family;
+        }
+        if let Ok(info) = self.read_cpu_info() {
+            let name = &info.module_type_name;
+            if name.contains("1200") || name.contains("1500") {
+                return CpuFamily::S71200_1500;
+            }
+            if name.contains("S7-300") || name.starts_with("CPU 3") {
+                return CpuFamily::S7300;
+            }
+            if name.contains("S7-400") || name.starts_with("CPU 4") {
+                return CpuFamily::S7400;
+            }
+        }
+        self.connect_profile.unwrap_or(CpuFamily::Other)
+    }
+
+    /// ### Reads scan cycle time statistics.
     ///
     /// Returns a [`CycleTimeInfo`] with the OB1 execution count and the minimum,
     /// maximum, and most-recent cycle times in milliseconds.
+    ///
+    /// On S7-1200/1500 this reads SZL `0x0194` directly. **S7-300/400 expose no SZL**
+    /// containing OB1 cycle-time statistics — see `S7Error::UnsupportedCpuFamily` below.
     ///
     /// ### Notes
     /// The PLC must be in RUN mode for cycle time data to be meaningful. In STOP mode
@@ -1608,8 +1687,23 @@ impl S7Client {
     /// ### Errors
     /// Same as [`read_szl`](S7Client::read_szl).
     /// Returns `S7Error::IsoInvalidTelegram` if the SZL payload is shorter than 18 bytes.
+    /// Returns `S7Error::UnsupportedCpuFamily` on S7-300/400: SZL `0x0194` is S7-1200/1500
+    /// only. Use a PLC-side DB-publish for cycle-time monitoring on S7-300/400 until a
+    /// TIS TIMEMEAS-based path is available.
     ///
     pub fn read_cycle_time(&mut self) -> Result<CycleTimeInfo, S7Error> {
+        match self.resolve_cpu_family() {
+            CpuFamily::S7300 | CpuFamily::S7400 => {
+                return Err(S7Error::UnsupportedCpuFamily {
+                    family: "S7-300/400",
+                    feature: "read_cycle_time(): SZL 0x0194 is S7-1200/1500 only; \
+                              S7-300/400 needs the TIS TIMEMEAS mechanism (not yet \
+                              implemented) or a PLC-side DB-publish",
+                });
+            }
+            CpuFamily::S71200_1500 | CpuFamily::Other => {}
+        }
+
         let szl = self.read_szl_block(S7_SZL_CYCLE_TIME, 0)?;
         if szl.data.len() < 18 {
             return Err(S7Error::IsoInvalidTelegram);
