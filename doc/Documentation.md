@@ -118,7 +118,7 @@ while !exit_request{
 |`read_diagnostic_buffer`|Reads and decodes the PLC diagnostic buffer               |
 |`read_cpu_info`         |Reads CPU component-identification strings                |
 |`read_work_memory`      |Reads work memory area sizes from SZL `0x0013`            |
-|`read_cycle_time`       |Reads OB1 scan cycle time statistics from SZL `0x0194`   |
+|`read_cycle_time`       |Reads OB1 scan cycle time statistics (S7-1200/1500 via SZL `0x0194`; S7-300/400 unsupported for now)|
 |`describe_event`        |Maps a diagnostic event ID to a human-readable description|
 
 ## Connection setup methods
@@ -207,7 +207,7 @@ pub fn connect_s71200_1500(&mut self, ip: &str) -> Result<(), S7Error>
 ```
 ### Connects to the S71200 or S71500 families   
 
-This helper method is same as `connect_rack_slot()` with rack=0 and slot=0
+This helper method is same as `connect_rack_slot()` with rack=0 and slot=0. On success, sets `connect_profile` to `Some(CpuFamily::S71200_1500)` — consulted by family-dispatched methods such as `read_cycle_time()`.
 ### Parameters
 - `ip`  : PLC IPV4 address.
  
@@ -219,7 +219,7 @@ pub fn connect_s7300(&mut self, ip: &str) -> Result<(), S7Error>
 ```
 ### Connects to S7300 family
 
-This helper method is same as `connect_rack_slot()` with rack=0 and slot=2
+This helper method is same as `connect_rack_slot()` with rack=0 and slot=2. On success, sets `connect_profile` to `Some(CpuFamily::S7300)` — consulted by family-dispatched methods such as `read_cycle_time()`.
 ### Parameters
 - `ip`  : PLC IPV4 address.
  
@@ -235,6 +235,8 @@ Rack and Slot are Hardware configuration parameters.
 For S7300 and S71200/1500 they are fixed, (see `connect_s7300()` and `connect_s71200_1500()` ).
  
 Ultimately, you will need of this method only to connect to S7400, WinAC or other Siemens hardware, like Drives, in which Rack and Slot can vary.
+
+On success, sets `connect_profile` to `Some(CpuFamily::Other)`, since the family cannot be inferred from a bare rack/slot pair. Family-dispatched methods such as `read_cycle_time()` fall back to CPU-model-string detection in this case.
  
 ### Parameters
 - `ip` : PLC IPV4 address.
@@ -597,6 +599,22 @@ pub struct DiagnosticEntry {
 }
 ```
 
+### `CpuFamily`
+
+CPU family recorded by a `connect_*` helper, used to select the correct mechanism for family-specific features (e.g. cycle-time reads via `read_cycle_time()`).
+
+```rust
+pub enum CpuFamily {
+    S71200_1500, // connected via connect_s71200_1500()
+    S7300,       // connected via connect_s7300()
+    S7400,       // never set automatically (no dedicated connect_s7400() helper);
+                 // only produced by CPU-model-string fallback detection
+    Other,       // family not distinguishable (e.g. via connect_rack_slot() / connect_tsap())
+}
+```
+
+`S7Client::connect_profile: Option<CpuFamily>` holds the value recorded for the current connection (`None` before any `connect_*` call).
+
 ### `CpuInfo`
 
 ```rust
@@ -711,9 +729,17 @@ Same as `read_szl()`.
 ```rust
 pub fn read_cycle_time(&mut self) -> Result<CycleTimeInfo, S7Error>
 ```
-#### Reads scan cycle time statistics from SZL `0x0194`.
+#### Reads scan cycle time statistics.
 
 Returns a `CycleTimeInfo` with the OB1 execution count and the minimum, maximum, and most-recent cycle times in milliseconds.
+
+On S7-1200/1500 this reads SZL `0x0194` directly. **S7-300/400 expose no SZL containing OB1 cycle-time statistics** — the method dispatches on the connected CPU family (see below) and returns `S7Error::UnsupportedCpuFamily` on those families instead of attempting the SZL read.
+
+#### CPU family detection
+The family is resolved in this order:
+1. The profile recorded by the `connect_*` helper used to connect (`connect_s71200_1500` → 1200/1500, `connect_s7300` → 300). This always wins.
+2. If the profile is unset or ambiguous (e.g. connected via `connect_rack_slot`/`connect_tsap`), a best-effort fallback matches the CPU model string from `read_cpu_info()` (SZL `0x001C`) against `"1200"`/`"1500"`/`"S7-300"`/`"S7-400"`/`"CPU 3…"`/`"CPU 4…"` patterns.
+3. If neither resolves the family, the pre-existing SZL `0x0194` behavior is used (unchanged for existing callers).
 
 #### Notes
 - The PLC must be in RUN mode for meaningful data. In STOP mode all time fields may be zero.
@@ -725,6 +751,7 @@ Returns a `CycleTimeInfo` with the OB1 execution count and the minimum, maximum,
 #### Errors
 Same as `read_szl()`.
 Returns `S7Error::IsoInvalidTelegram` if the SZL payload is shorter than 18 bytes.
+Returns `S7Error::UnsupportedCpuFamily` on S7-300/400: SZL `0x0194` is S7-1200/1500 only. Use a PLC-side DB-publish for cycle-time monitoring on S7-300/400 until a TIS TIMEMEAS-based path is available.
 
 ---
 ## Diagnostic event ID lookup
