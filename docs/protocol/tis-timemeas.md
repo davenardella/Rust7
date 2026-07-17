@@ -64,10 +64,17 @@ builder already relies on exactly this: `build_szl_first_request` uses method `0
 fields, 8-byte param block); `build_szl_next_request` uses method `0x12` (EXT fields present,
 12-byte param block, carrying the echoed sequence number for continuation).
 
-**type\|group byte** (`packet-s7comm.c:6780-6787`): top 2 bits = type (`0` = Indication,
-`1` = Request, `2` = Response — inferred from Rust7's existing SZL request byte `0x44` = type
-`1`/group `4`), bottom 6 bits = function group. Function groups
-(`packet-s7comm.c:672-691`):
+**type\|group byte** (`packet-s7comm.c:6780-6787`): top 2 bits = type, bottom 6 bits =
+function group. Type values (`packet-s7comm.h:49-51`):
+
+| Constant | Value | Name |
+|---|---|---|
+| `S7COMM_UD_TYPE_IND` | `0x0` | Indication |
+| `S7COMM_UD_TYPE_REQ` | `0x1` | Request |
+| `S7COMM_UD_TYPE_RES` | `0x2` | Response |
+
+This confirms (rather than merely infers) Rust7's existing SZL request byte `0x44` = type
+`1` (Request) / group `4` (CPU functions). Function groups (`packet-s7comm.c:672-691`):
 
 | Constant | Value | Name |
 |---|---|---|
@@ -76,7 +83,10 @@ fields, 8-byte param block); `build_szl_next_request` uses method `0x12` (EXT fi
 | `S7COMM_UD_FUNCGROUP_BLOCK` | `0x03` | Block functions |
 | `S7COMM_UD_FUNCGROUP_CPU` | `0x04` | CPU functions (used by SZL reads) |
 
-So a TIS **request** type|group byte is `(1 << 6) | 0x01 = 0x41`.
+So a TIS **request** type|group byte is `(1 << 6) | 0x01 = 0x41`; a TIS **response** (as sent by
+the PLC, type=`0x2`) would be `(2 << 6) | 0x01 = 0x81`. Rust7 does not currently validate the
+response's type|group byte (only the shared return-code/length/continuation-byte envelope
+fields), but the tshark oracle test uses `0x81` when synthesizing a plausible response frame.
 
 > Cross-check against PLC4X: `s7.mspec:189-204`'s `S7ParameterUserDataItemCPUFunctions` models
 > this same byte as two 4-bit fields (`cpuFunctionType`, `cpuFunctionGroup`) rather than 2+6
@@ -95,7 +105,7 @@ and, for the SZL case, against moka7/Snap7 behavior:
 
 | Offset | Field |
 |---|---|
-| 19 | continuation byte: `0x00` = last/only fragment; non-zero = echo as `seq_num` in the next request |
+| 19 | `lastDataUnit`: `0x00` = last/only fragment (`S7COMM_UD_LASTDATAUNIT_YES`); non-zero = more to come (`S7COMM_UD_LASTDATAUNIT_NO = 0x01`) — echoed as `seq_num` in the next request |
 | 22 | data-block return code (`0xFF` = success) |
 | 23 | transport size (unread by Rust7) |
 | 24–25 | data-block payload length (BE u16) |
@@ -106,6 +116,27 @@ function group by the dissector's shared `s7comm_decode_ud_data` (`packet-s7comm
 specifically the `ret_val`/`tsize`/`len` reads before the `switch (funcgroup)` dispatch at
 `packet-s7comm.c:6617-6621`) — it is not SZL-specific. Rust7 implements this shared read as
 `read_userdata_response()` in `src/client.rs`, used by both the SZL path and TIMEMEAS.
+
+**Response parameter-block shape, confirmed via live tshark (not just static reading):**
+building `src/tests/tshark_oracle.rs`'s synthetic response frame surfaced a genuine error in
+this document's first draft, which claimed a 12-byte S7 header (10-byte base + 2 error-class/
+code bytes) followed by a 10-byte parameter block. A real, installed tshark (Wireshark 4.6.7)
+rejected that shape with garbled field values; iterating against it empirically confirmed the
+actual shape is a plain **10-byte header** (identical to requests: protocol ID, ROSCTR,
+redundancy(2), PDU ref(2), param length(2), data length(2) — no separate error-class/code
+bytes) followed by a **12-byte parameter block**: the same 8-byte core as a request
+(function/itemcount/itemtype/itemlen/method/type|group/subfunc/seqnum) plus
+`dataUnitReferenceNumber`(1) + `lastDataUnit`(1) + `errorCode`(2) — all three always present
+together on responses, matching PLC4X `s7.mspec:199-201`'s gating condition. This does **not**
+change any Rust7 offset constant: `USERDATA_SEQ_DONE_OFFSET`(19) / `_DATA_RET_OFFSET`(22) /
+`_DATA_LEN_OFFSET`(24) / `_PAYLOAD_OFFSET`(26) were already numerically correct (proof: the
+`read_work_memory` integration test performs a real multi-fragment SZL read against
+`fbarresi/softplc` using exactly these offsets and passes) — only this document's, and the
+oracle test's, *understanding* of which field sits at offset 19 needed correcting (it is
+`lastDataUnit`, not `sequenceNumber` as the "echo as seq_num" language above might suggest;
+the value happens to double as the continuation signal `read_szl_block`/TIS both rely on).
+This is exactly the kind of error the tshark oracle exists to catch, and it caught one on its
+first real run — see the request-side fix below for the other bug it found.
 
 ## TIS TIMEMEAS specifics
 
@@ -174,17 +205,43 @@ type|group   = 0x41            (REQ, TIS)
 subfunc      = 0x06            (TIMEMEAS)
 method       = 0x11            (SHORT — single-shot, no continuation)
 seq_num      = 0x00
+
+// Generic userdata data-block preamble (present in every function group, request or
+// response — see the "Response" section above; on a request the return code is a
+// meaningless filler, mirroring the existing SZL request builder):
+return code    = 0xFF (Success — filler)
+transport size = 0x09 (OCTET_STRING)
+length         = 8    (byte length of the TIS-specific portion below)
+
+// TIS-specific portion (what s7comm_decode_ud_tis_subfunc reads):
 parametersize = 4
 datasize      = 0
 parameter block = [0x00, 0x00, 0x00, 0x00]   // TIS Parameter 1 = 0, TIS Parameter 2 = 0
 data block       = (empty)
 ```
 
-`// VERIFY-ON-HARDWARE`: the two zeroed parameter registers are the only well-formed minimal
-choice available; their actual meaning for TIMEMEAS (an OB number selector? a measurement
-point/trigger reference? unused for this subfunction entirely?) is unknown. If real hardware
-rejects this frame, capturing a real STEP 7 "Scan Cycle Time" session with Wireshark is the only
-way to determine the correct values.
+Total request telegram: 37 bytes (17-byte TPKT+COTP+S7-header+SHORT-param-block + 4-byte
+generic preamble + 8-byte TIS-specific portion).
+
+**Confirmed against live tshark**, not just static reading: this document's and `src/tis.rs`'s
+first draft omitted the 4-byte generic preamble entirely (33 bytes total, data block =
+`[parametersize, datasize, param]` with no preamble). A real, installed tshark misdissected
+that shorter frame — reading the TIS wrapper's own `parametersize` bytes as if they were the
+generic preamble's `return code`/`transport size` fields, and reporting the actual TIS content
+as `Length: 0`. Adding the preamble (as the working `build_szl_first_request` already does)
+produces a frame tshark dissects cleanly down to the individual TIS parameter registers — see
+`src/tests/tshark_oracle.rs`. The envelope shape is now confirmed; the *values* inside it
+(`// VERIFY-ON-HARDWARE` below) remain a guess.
+
+`// VERIFY-ON-HARDWARE`: the two zeroed TIS parameter registers are the only well-formed
+minimal choice available; their actual meaning for TIMEMEAS (an OB number selector? a
+measurement point/trigger reference? unused for this subfunction entirely?) is unknown. A live
+tshark's field-name table happens to label the generic "TIS Parameter 2" register as a
+"Trigger type" enum (value `0` = "Update Monitor Variables / Activate Modify Values") in other
+TIS contexts, but this labeling is not confirmed to apply to TIMEMEAS specifically — it may be
+a shared/reused field across multiple TIS subfunctions with subfunction-specific meaning. If
+real hardware rejects this frame, capturing a real STEP 7 "Scan Cycle Time" session with
+Wireshark is the only way to determine the correct values.
 
 ## Rust7's response parsing (guess — VERIFY-ON-HARDWARE)
 

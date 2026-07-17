@@ -53,7 +53,7 @@ const EOT: u8 = 0x80; // ISO End of Trasmission
 const RW_RES_OFFSET: usize = 14;
 
 /// Operation successful
-const RES_SUCCESS: u8 = 0xFF;
+pub(crate) const RES_SUCCESS: u8 = 0xFF;
 /// Invalid address: read/write beyond the area limits, or the DB uses optimized access.
 const RES_INVALID_ADDRESS: u8 = 0x05;
 /// Resource not found

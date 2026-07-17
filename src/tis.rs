@@ -15,20 +15,22 @@
 // VERIFY-ON-HARDWARE throughout. Treat any CycleTimeInfo obtained through this path as
 // provisional until confirmed against a physical S7-300/400 CPU.
 
-use crate::client::{build_userdata_request, read_userdata_response, USERDATA_METHOD_SHORT};
+use crate::client::{
+    build_userdata_request, read_userdata_response, RES_SUCCESS, USERDATA_METHOD_SHORT,
+};
 use crate::{CycleTimeInfo, S7Error};
 use std::io::Write;
 use std::net::TcpStream;
 
 /// TIS function group ("Programmer commands"). `packet-s7comm.c:673` (`S7COMM_UD_FUNCGROUP_TIS`).
-const TIS_FUNCGROUP: u8 = 0x01;
+pub(crate) const TIS_FUNCGROUP: u8 = 0x01;
 /// TIS subfunction: TIMEMEAS ("Time measurement from to"). `packet-s7comm.c:764`.
-const TIS_SUBFUNC_TIMEMEAS: u8 = 0x06;
+pub(crate) const TIS_SUBFUNC_TIMEMEAS: u8 = 0x06;
 /// Packed (type<<6)|funcgroup byte for a TIS *request*: type=REQ(1), group=TIS(`TIS_FUNCGROUP`).
-const TIS_TYPE_GROUP_REQ: u8 = (1 << 6) | TIS_FUNCGROUP;
+pub(crate) const TIS_TYPE_GROUP_REQ: u8 = (1 << 6) | TIS_FUNCGROUP;
 /// Arbitrary sentinel PDU reference for TIMEMEAS requests — distinct from the SZL builders'
 /// 0x0011/0x0012. PDU references are client-chosen and only echoed back, never validated.
-const TIS_PDU_REF: u16 = 0x0013;
+pub(crate) const TIS_PDU_REF: u16 = 0x0013;
 
 /// VERIFY-ON-HARDWARE: the TIS parameter block's meaning for TIMEMEAS is undocumented (see
 /// docs/protocol/tis-timemeas.md, "Rust7's request"). `s7comm_decode_ud_tis_param`
@@ -42,13 +44,28 @@ const TIS_TIMEMEAS_PARAM: [u8; 4] = [0x00, 0x00, 0x00, 0x00];
 /// "Single-shot vs. job").
 ///
 /// VERIFY-ON-HARDWARE: the exact parameter values that select "OB1 cycle time" are unknown.
-fn build_timemeas_request() -> Vec<u8> {
-    // TIS data-block wrapper: parametersize(2, BE) + datasize(2, BE) + parameter block +
-    // data block. `s7comm_decode_ud_tis_subfunc`, packet-s7comm.c:5213-5233.
-    let mut data_block = Vec::with_capacity(4 + TIS_TIMEMEAS_PARAM.len());
-    data_block.extend_from_slice(&(TIS_TIMEMEAS_PARAM.len() as u16).to_be_bytes()); // parametersize = 4
-    data_block.extend_from_slice(&0u16.to_be_bytes()); // datasize = 0 (no request data block)
-    data_block.extend_from_slice(&TIS_TIMEMEAS_PARAM);
+pub(crate) fn build_timemeas_request() -> Vec<u8> {
+    // TIS-specific portion: parametersize(2, BE) + datasize(2, BE) + parameter block + data
+    // block. `s7comm_decode_ud_tis_subfunc`, packet-s7comm.c:5213-5233. This is what
+    // `s7comm_decode_ud_tis_subfunc` reads directly — i.e. everything *after* the generic
+    // userdata data-block preamble below.
+    let mut tis_block = Vec::with_capacity(4 + TIS_TIMEMEAS_PARAM.len());
+    tis_block.extend_from_slice(&(TIS_TIMEMEAS_PARAM.len() as u16).to_be_bytes()); // parametersize = 4
+    tis_block.extend_from_slice(&0u16.to_be_bytes()); // datasize = 0 (no request data block)
+    tis_block.extend_from_slice(&TIS_TIMEMEAS_PARAM);
+
+    // Generic userdata data-block preamble, shared by every function group and present in
+    // both requests and responses: return code, transport size, and the length of the
+    // funcgroup-specific portion that follows (`s7comm_decode_ud_data`,
+    // packet-s7comm.c:6532-6543 — parsed identically regardless of funcgroup). Values mirror
+    // the existing, PLC-verified SZL request builder (`build_szl_first_request`): the return
+    // code is a request-side filler (a "return code" is meaningless on a request, but this
+    // is what the working SZL implementation sends), transport size is OCTET_STRING.
+    let mut data_block = Vec::with_capacity(4 + tis_block.len());
+    data_block.push(RES_SUCCESS);
+    data_block.push(0x09); // transport size = OCTET_STRING
+    data_block.extend_from_slice(&(tis_block.len() as u16).to_be_bytes());
+    data_block.extend_from_slice(&tis_block);
 
     build_userdata_request(
         TIS_PDU_REF,
@@ -78,7 +95,7 @@ pub(crate) struct TimeMeasRaw {
 /// parameter registers and raw data block. The wrapper shape (`parametersize`, `datasize`,
 /// two response registers) is confirmed by the dissector (`s7comm_decode_ud_tis_subfunc`,
 /// `s7comm_decode_ud_tis_param`'s response branch); the *content* of `data` is not.
-fn parse_timemeas_response(payload: &[u8]) -> Result<TimeMeasRaw, S7Error> {
+pub(crate) fn parse_timemeas_response(payload: &[u8]) -> Result<TimeMeasRaw, S7Error> {
     if payload.len() < 4 {
         return Err(S7Error::IsoInvalidTelegram);
     }
@@ -117,7 +134,7 @@ fn parse_timemeas_response(payload: &[u8]) -> Result<TimeMeasRaw, S7Error> {
 /// see docs/protocol/tis-timemeas.md "Rust7's response parsing". This has **not** been
 /// confirmed against any real S7-300/400 TIMEMEAS response; a length-only check cannot
 /// confirm the layout is actually correct.
-fn decode_cycle_time_guess(data: &[u8]) -> Result<CycleTimeInfo, S7Error> {
+pub(crate) fn decode_cycle_time_guess(data: &[u8]) -> Result<CycleTimeInfo, S7Error> {
     if data.len() < 16 {
         return Err(S7Error::IsoInvalidTelegram);
     }
