@@ -23,6 +23,12 @@
 - Generic ROSCTR-0x07 Userdata request/response envelope (`build_userdata_request`,
   `read_userdata_response` in `src/client.rs`), extracted from the SZL-specific builders and
   shared by both the SZL and TIS paths
+- Offline validation for the TIS path: byte-exact codec tests (`src/tests/tis.rs`), an
+  independent-dissector oracle that asks a real `tshark` binary to confirm generated frames
+  are well-formed S7comm framing (`src/tests/tshark_oracle.rs`, gated behind `RUST7_TSHARK=1`
+  — caught two real encoding bugs during development, see `docs/protocol/tis-timemeas.md`),
+  and 5 `#[ignore]`'d `VERIFY-ON-HARDWARE` integration tests (`tests/integration/tis.rs`) for
+  the assumptions that can only be confirmed against a physical S7-300/400 CPU
 
 ### Fixed
 - `read_cycle_time()` on S7-300/400 no longer returns the misleading

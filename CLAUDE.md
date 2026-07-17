@@ -107,10 +107,10 @@ Requires the `task` CLI (https://taskfile.dev). SoftPLC image: `fbarresi/softplc
 ## Testing
 
 ```bash
-# Unit tests (138 tests, no Docker required)
+# Unit tests (156 tests, no Docker required)
 cargo test --lib
 
-# Integration tests (10 tests + 6 SZL probe tests; requires Docker or Podman)
+# Integration tests (10 tests + 11 ignored probe/VERIFY-ON-HARDWARE tests; requires Docker or Podman)
 cargo test --test integration
 
 # Full suite (unit + doc + integration)
@@ -128,6 +128,9 @@ Integration tests live in `tests/integration/` and are wired up via `[[test]]` i
 - `tests/integration/connection.rs` — connection lifecycle (connect, PDU negotiation, disconnect, reconnect)
 - `tests/integration/read_write.rs` — `read_db`, `write_db`, `read_bit`, `write_bit`, auto-chunking
 - `tests/integration/szl.rs` — SZL tests: `read_work_memory` passes against softplc; cycle-time and other SZL probes are `#[ignore]`'d (softplc returns errors for those IDs)
+- `tests/integration/tis.rs` — 5 `#[ignore]`'d `VERIFY-ON-HARDWARE` tests for the experimental TIS TIMEMEAS path; require a real S7-300/400 CPU (`RUST7_HARDWARE_IP` env var) — SoftPLC silently drops TIS requests, confirmed via manual testing. See `docs/protocol/tis-timemeas.md`.
+
+**Offline protocol tests** (`src/tests/tis.rs`, `src/tests/tshark_oracle.rs`, part of `cargo test --lib`): byte-exact codec tests for the TIS request/response encoding, plus an independent-dissector oracle that writes generated frames to a pcap and asks a real `tshark` binary to confirm they're well-formed S7comm framing. The oracle is gated behind `RUST7_TSHARK=1` *and* `tshark` on `PATH` — skips gracefully otherwise. Run with `RUST7_TSHARK=1 cargo test --lib tshark_oracle` after `brew install wireshark` (CLI-only formula) or `apt-get install tshark`.
 
 Do not introduce new doc-test failures.
 
@@ -141,11 +144,11 @@ Do not introduce new doc-test failures.
 |---|---|---|
 | `src/lib.rs` | 38 | Crate entry. `#![forbid(unsafe_code)]`, embeds README as crate docs, re-exports public surface. Add nothing here without adding to `src/client.rs` first. |
 | `src/client.rs` | 1802 | All implementation: constants, macros, `S7Error`, `CpuFamily`, `S7Client`. The full protocol stack. |
-| `src/tis.rs` | 147 | **Experimental**, crate-internal. TIS `TIMEMEAS` userdata subfunction — S7-300/400 cycle-time reads. Unverified against real hardware; see `docs/protocol/tis-timemeas.md`. |
+| `src/tis.rs` | 164 | **Experimental**, crate-internal. TIS `TIMEMEAS` userdata subfunction — S7-300/400 cycle-time reads. Unverified against real hardware; see `docs/protocol/tis-timemeas.md`. |
 | `src/diag_events.rs` | — | Diagnostic event ID lookup tables (557 entries) and `describe_event(u16) -> DiagEventInfo`. Derived from the Wireshark S7Comm dissector. |
 | `Cargo.toml` | 22 | Zero `[dependencies]`. `[lib]` points to `src/lib.rs`. `[dev-dependencies]` has testcontainers. |
-| `doc/Documentation.md` | 778 | Full API reference. Canonical source of truth for method semantics, parameters, and error codes. |
-| `docs/protocol/tis-timemeas.md` | — | Original protocol write-up for TIS `TIMEMEAS`, citing the Wireshark dissector and Apache PLC4X `s7.mspec`. Documents what's verified vs. guessed. |
+| `doc/Documentation.md` | 792 | Full API reference. Canonical source of truth for method semantics, parameters, and error codes. |
+| `docs/protocol/tis-timemeas.md` | 323 | Original protocol write-up for TIS `TIMEMEAS`, citing the Wireshark dissector and Apache PLC4X `s7.mspec`. Documents what's verified vs. guessed, including two bugs the tshark oracle caught during development. |
 | `examples/docker/main.rs` | 187 | Standalone binary (separate crate) demonstrating read/write/bit ops against SoftPLC. |
 | `examples/docker/docker-compose.yml` | 10 | Launches SoftPLC on port 102 (S7) and 8080 (REST). |
 | `examples/docker/Taskfile.yml` | 58 | Task runner. Key tasks: `build`, `run`, `docker-up`, `docker-down`, `dev`. |
@@ -156,6 +159,7 @@ Do not introduce new doc-test failures.
 | `tests/integration/common.rs` | — | Shared helpers: `start_softplc()`, `provision_db()`, `connect_client()`. |
 | `tests/integration/connection.rs` | — | Connection lifecycle integration tests (4 tests). |
 | `tests/integration/read_write.rs` | — | Read/write/bit integration tests against SoftPLC (5 tests). |
+| `tests/integration/tis.rs` | — | 5 `#[ignore]`'d `VERIFY-ON-HARDWARE` tests for TIS `TIMEMEAS`; require a real S7-300/400 CPU. |
 
 ### Key Files to Understand First
 
