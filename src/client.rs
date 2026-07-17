@@ -74,24 +74,27 @@ pub const S7_SZL_CYCLE_TIME: u16 = 0x0194;
 /// Current CPU operating mode (RUN / STOP / STARTUP).
 pub const S7_SZL_CPU_STATUS: u16 = 0x0424;
 
-// Userdata (ROSCTR 0x07) request envelope — shared by every function group (SZL "CPU
-// functions", TIS "Programmer commands", …). Only the trailing data block differs per
-// function group. See docs/protocol/tis-timemeas.md for field-level citations.
+// Userdata (ROSCTR 0x07) envelope — shared by every function group (SZL "CPU functions",
+// TIS "Programmer commands", …). Only the trailing data block (request) / payload
+// (response) content differs per function group. See docs/protocol/tis-timemeas.md for
+// field-level citations against the Wireshark dissector and the Apache PLC4X `s7.mspec`.
 const USERDATA_HEADER_LEN: usize = TPKT_ISO_LEN + 10; // TPKT+COTP (7) + S7 userdata header (10)
 const USERDATA_METHOD_SHORT: u8 = 0x11; // first/single-shot request — no EXT continuation fields
 const USERDATA_METHOD_EXT: u8 = 0x12; // continuation request — adds 4 EXT bytes (dataUnitRef, lastDataUnit, errorCode)
 
-// SZL protocol internals
 // Offsets within the S7 userdata **response** body (after the 7-byte TPKT/COTP header).
 // S7 userdata response header: 12 bytes (10-byte base + 2 error-class/code bytes).
 // Parameter block: 10 bytes starting at response[12].
 // Data block: starts at response[22].
-// Verified against moka7 / Snap7 (PDU[N] = response[N-7]).
-const SZL_SEQ_DONE_OFFSET: usize = 19; // last param byte: 0x00 = final/only fragment
-const SZL_DATA_RET_OFFSET: usize = 22; // data-block return code (0xFF = ok)
-const SZL_DATA_LEN_OFFSET: usize = 24; // data-block payload length (2 bytes, big-endian)
-const SZL_PAYLOAD_OFFSET: usize = 26; // start of SZL payload within the data block
-const SZL_MAX_ITER: usize = 100; // safety cap on the fragment-accumulation loop
+// Verified against moka7 / Snap7 for SZL (PDU[N] = response[N-7]); the same offsets apply
+// to every function group since `s7comm_decode_ud_data` in the Wireshark dissector parses
+// this return-code/transport-size/data-length preamble identically regardless of funcgroup
+// — see docs/protocol/tis-timemeas.md.
+const USERDATA_SEQ_DONE_OFFSET: usize = 19; // last param byte: 0x00 = final/only fragment
+const USERDATA_DATA_RET_OFFSET: usize = 22; // data-block return code (0xFF = ok)
+const USERDATA_DATA_LEN_OFFSET: usize = 24; // data-block payload length (2 bytes, big-endian)
+const USERDATA_PAYLOAD_OFFSET: usize = 26; // start of the function-group-specific payload
+const USERDATA_MAX_ITER: usize = 100; // safety cap on the fragment-accumulation loop
 
 // Macros
 macro_rules! hi_part {
@@ -431,6 +434,52 @@ fn check_iso_packet(
 
     // Returns the ramaining byte to read from the telegram
     Ok(telegram_length - TPKT_ISO_LEN)
+}
+
+// Reads and validates one ROSCTR-0x07 Userdata response fragment: TPKT/COTP header,
+// data-block return code, and the function-group-specific payload bytes (everything after
+// the shared return-code/transport-size/data-length preamble). This envelope shape is
+// identical for every userdata function group — see the USERDATA_* offset constants above
+// and docs/protocol/tis-timemeas.md. Callers must separately validate that the returned
+// payload is long enough for their own function-group-specific header.
+//
+// Returns `(payload, continuation_byte)`. `continuation_byte == 0x00` means this was the
+// last/only fragment; a non-zero value must be echoed back as `seq_num` in the next request.
+fn read_userdata_response(
+    stream: &mut TcpStream,
+    pdu_length: u16,
+) -> Result<(Vec<u8>, u8), S7Error> {
+    let mut iso_packet = [0u8; TPKT_ISO_LEN];
+    stream.read_exact(&mut iso_packet)?;
+
+    let s7_comm_size = check_iso_packet(pdu_length, &mut iso_packet)?;
+
+    if s7_comm_size < USERDATA_PAYLOAD_OFFSET {
+        return Err(S7Error::IsoInvalidTelegram);
+    }
+
+    let mut response = [0u8; PDU_LEN_REQ as usize];
+    let size_resp = stream.read(&mut response)?;
+    if size_resp < s7_comm_size {
+        return Err(S7Error::IsoInvalidTelegram);
+    }
+
+    if response[USERDATA_DATA_RET_OFFSET] != RES_SUCCESS {
+        return Err(S7Error::SzlReadFailed);
+    }
+
+    let payload_len = make_u16!(
+        response[USERDATA_DATA_LEN_OFFSET],
+        response[USERDATA_DATA_LEN_OFFSET + 1]
+    ) as usize;
+    let payload_end = (USERDATA_PAYLOAD_OFFSET + payload_len).min(size_resp);
+    let payload = if USERDATA_PAYLOAD_OFFSET < payload_end {
+        response[USERDATA_PAYLOAD_OFFSET..payload_end].to_vec()
+    } else {
+        Vec::new()
+    };
+
+    Ok((payload, response[USERDATA_SEQ_DONE_OFFSET]))
 }
 
 // Builds a ROSCTR-0x07 Userdata request telegram: TPKT+COTP+S7 header, the userdata
@@ -1456,7 +1505,7 @@ impl S7Client {
         let mut is_first = true;
         let mut seq_num: u8 = 0;
 
-        for _ in 0..SZL_MAX_ITER {
+        for _ in 0..USERDATA_MAX_ITER {
             self.chunks += 1;
 
             let request = if is_first {
@@ -1467,31 +1516,7 @@ impl S7Client {
 
             stream.write_all(&request)?;
 
-            let mut iso_packet = [0u8; TPKT_ISO_LEN];
-            stream.read_exact(&mut iso_packet)?;
-
-            let s7_comm_size = check_iso_packet(self.pdu_length, &mut iso_packet)?;
-
-            // We need at least enough bytes to reach the SZL payload header (FIRST: 34 bytes)
-            if s7_comm_size < SZL_PAYLOAD_OFFSET + 8 {
-                return Err(S7Error::IsoInvalidTelegram);
-            }
-
-            let mut response = [0u8; PDU_LEN_REQ as usize];
-            let size_resp = stream.read(&mut response)?;
-            if size_resp < s7_comm_size {
-                return Err(S7Error::IsoInvalidTelegram);
-            }
-
-            if response[SZL_DATA_RET_OFFSET] != RES_SUCCESS {
-                return Err(S7Error::SzlReadFailed);
-            }
-
-            let payload_len = make_u16!(
-                response[SZL_DATA_LEN_OFFSET],
-                response[SZL_DATA_LEN_OFFSET + 1]
-            ) as usize;
-            let payload_end = (SZL_PAYLOAD_OFFSET + payload_len).min(size_resp);
+            let (payload, done_byte) = read_userdata_response(stream, self.pdu_length)?;
 
             if is_first {
                 // FIRST response SZL payload layout:
@@ -1500,34 +1525,23 @@ impl S7Client {
                 //   [4..6]  LENTHDR (bytes per record)
                 //   [6..8]  N_DR (total record count across all fragments)
                 //   [8..]   records
-                if payload_end < SZL_PAYLOAD_OFFSET + 8 {
+                if payload.len() < 8 {
                     return Err(S7Error::IsoInvalidTelegram);
                 }
-                length_dr = make_u16!(
-                    response[SZL_PAYLOAD_OFFSET + 4],
-                    response[SZL_PAYLOAD_OFFSET + 5]
-                );
-                n_dr = make_u16!(
-                    response[SZL_PAYLOAD_OFFSET + 6],
-                    response[SZL_PAYLOAD_OFFSET + 7]
-                );
-                let rec_start = SZL_PAYLOAD_OFFSET + 8;
-                if rec_start < payload_end {
-                    records.extend_from_slice(&response[rec_start..payload_end]);
-                }
+                length_dr = make_u16!(payload[4], payload[5]);
+                n_dr = make_u16!(payload[6], payload[7]);
+                records.extend_from_slice(&payload[8..]);
             } else {
                 // NEXT response SZL payload layout:
                 //   [0..2]  LENTHDR (repeat)
                 //   [2..4]  N_DR of this fragment
                 //   [4..]   records
-                let rec_start = SZL_PAYLOAD_OFFSET + 4;
-                if rec_start < payload_end {
-                    records.extend_from_slice(&response[rec_start..payload_end]);
+                if payload.len() > 4 {
+                    records.extend_from_slice(&payload[4..]);
                 }
             }
 
-            // Byte at SZL_SEQ_DONE_OFFSET: 0x00 = last/only fragment; non-zero = more to come.
-            let done_byte = response[SZL_SEQ_DONE_OFFSET];
+            // done_byte == 0x00: last/only fragment; non-zero: more to come.
             if done_byte == 0x00 {
                 break;
             }
