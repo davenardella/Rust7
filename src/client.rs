@@ -79,8 +79,8 @@ pub const S7_SZL_CPU_STATUS: u16 = 0x0424;
 // (response) content differs per function group. See docs/protocol/tis-timemeas.md for
 // field-level citations against the Wireshark dissector and the Apache PLC4X `s7.mspec`.
 const USERDATA_HEADER_LEN: usize = TPKT_ISO_LEN + 10; // TPKT+COTP (7) + S7 userdata header (10)
-const USERDATA_METHOD_SHORT: u8 = 0x11; // first/single-shot request — no EXT continuation fields
-const USERDATA_METHOD_EXT: u8 = 0x12; // continuation request — adds 4 EXT bytes (dataUnitRef, lastDataUnit, errorCode)
+pub(crate) const USERDATA_METHOD_SHORT: u8 = 0x11; // first/single-shot request — no EXT continuation fields
+pub(crate) const USERDATA_METHOD_EXT: u8 = 0x12; // continuation request — adds 4 EXT bytes (dataUnitRef, lastDataUnit, errorCode)
 
 // Offsets within the S7 userdata **response** body (after the 7-byte TPKT/COTP header).
 // S7 userdata response header: 12 bytes (10-byte base + 2 error-class/code bytes).
@@ -174,7 +174,11 @@ pub enum S7Error {
     /// SZL read returned a non-success data return code from the PLC.
     SzlReadFailed,
     /// The requested feature is not available on the connected CPU family via the
-    /// attempted mechanism (e.g. cycle-time SZL reads on S7-300/400).
+    /// attempted mechanism. Not currently returned by any method — `read_cycle_time()`'s
+    /// S7-300/400 branch now attempts the experimental TIS TIMEMEAS path (see
+    /// `docs/protocol/tis-timemeas.md`) instead of rejecting up front. Reserved for a
+    /// future capability check (e.g. SZL `0x0131`/`0x0008`) that can confirm a feature is
+    /// genuinely absent rather than merely untried.
     UnsupportedCpuFamily {
         /// Human-readable name of the detected CPU family (e.g. `"S7-300/400"`).
         family: &'static str,
@@ -445,7 +449,7 @@ fn check_iso_packet(
 //
 // Returns `(payload, continuation_byte)`. `continuation_byte == 0x00` means this was the
 // last/only fragment; a non-zero value must be echoed back as `seq_num` in the next request.
-fn read_userdata_response(
+pub(crate) fn read_userdata_response(
     stream: &mut TcpStream,
     pdu_length: u16,
 ) -> Result<(Vec<u8>, u8), S7Error> {
@@ -490,7 +494,7 @@ fn read_userdata_response(
 // the data block's contents are function-group-specific. See
 // docs/protocol/tis-timemeas.md for field-level citations against the Wireshark dissector
 // and the Apache PLC4X `s7.mspec`.
-fn build_userdata_request(
+pub(crate) fn build_userdata_request(
     pdu_ref: u16,
     method: u8,
     type_group: u8,
@@ -1716,29 +1720,36 @@ impl S7Client {
     /// maximum, and most-recent cycle times in milliseconds.
     ///
     /// On S7-1200/1500 this reads SZL `0x0194` directly. **S7-300/400 expose no SZL**
-    /// containing OB1 cycle-time statistics — see `S7Error::UnsupportedCpuFamily` below.
+    /// containing OB1 cycle-time statistics; instead this attempts the TIS `TIMEMEAS`
+    /// userdata subfunction.
+    ///
+    /// ### ⚠ Experimental on S7-300/400
+    /// The TIS path is **unverified against real hardware** — see
+    /// `docs/protocol/tis-timemeas.md`. No known open-source S7 client implements
+    /// `TIMEMEAS`, and the Wireshark dissector itself has "never seen" one on the wire, so
+    /// the request parameters and response layout used here are documented best-effort
+    /// guesses. A PLC-level rejection surfaces as a typed error (never a fabricated
+    /// result), but a response the PLC *accepts* may still be decoded into a
+    /// `CycleTimeInfo` that does not actually represent cycle-time statistics. Treat any
+    /// S7-300/400 result as provisional until confirmed against a physical CPU; a PLC-side
+    /// DB-publish remains the recommended production approach for these families.
     ///
     /// ### Notes
     /// The PLC must be in RUN mode for cycle time data to be meaningful. In STOP mode
     /// all time fields may be zero.
     ///
     /// ### Errors
-    /// Same as [`read_szl`](S7Client::read_szl).
-    /// Returns `S7Error::IsoInvalidTelegram` if the SZL payload is shorter than 18 bytes.
-    /// Returns `S7Error::UnsupportedCpuFamily` on S7-300/400: SZL `0x0194` is S7-1200/1500
-    /// only. Use a PLC-side DB-publish for cycle-time monitoring on S7-300/400 until a
-    /// TIS TIMEMEAS-based path is available.
+    /// On S7-1200/1500: same as [`read_szl`](S7Client::read_szl); returns
+    /// `S7Error::IsoInvalidTelegram` if the SZL payload is shorter than 18 bytes.
+    /// On S7-300/400: `S7Error::NotConnected` if not connected; `S7Error::SzlReadFailed` if
+    /// the PLC returns a non-success data return code for the TIS request;
+    /// `S7Error::IsoInvalidTelegram` if the response is malformed or shorter than the
+    /// expected minimum length; other low-level errors (`S7Error::Io`, `S7Error::Iso*`) as
+    /// for any network operation.
     ///
     pub fn read_cycle_time(&mut self) -> Result<CycleTimeInfo, S7Error> {
         match self.resolve_cpu_family() {
-            CpuFamily::S7300 | CpuFamily::S7400 => {
-                return Err(S7Error::UnsupportedCpuFamily {
-                    family: "S7-300/400",
-                    feature: "read_cycle_time(): SZL 0x0194 is S7-1200/1500 only; \
-                              S7-300/400 needs the TIS TIMEMEAS mechanism (not yet \
-                              implemented) or a PLC-side DB-publish",
-                });
-            }
+            CpuFamily::S7300 | CpuFamily::S7400 => return self.read_cycle_time_tis(),
             CpuFamily::S71200_1500 | CpuFamily::Other => {}
         }
 
@@ -1753,6 +1764,24 @@ impl S7Client {
             max_ms:     u32::from_be_bytes([d[10], d[11], d[12], d[13]]) as f64 / 10.0,
             current_ms: u32::from_be_bytes([d[14], d[15], d[16], d[17]]) as f64 / 10.0,
         })
+    }
+
+    // S7-300/400 branch of read_cycle_time(): experimental TIS TIMEMEAS path. See
+    // crate::tis and docs/protocol/tis-timemeas.md.
+    fn read_cycle_time_tis(&mut self) -> Result<CycleTimeInfo, S7Error> {
+        self.last_time = 0.0;
+        self.chunks = 0;
+
+        if !self.connected {
+            return Err(S7Error::NotConnected);
+        }
+
+        let start_time = Instant::now();
+        self.chunks = 1;
+        let stream = self.stream.as_mut().unwrap();
+        let result = crate::tis::read_cycle_time(stream, self.pdu_length);
+        self.last_time = start_time.elapsed().as_secs_f64() * 1000.0;
+        result
     }
 }
 

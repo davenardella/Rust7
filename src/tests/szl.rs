@@ -29,23 +29,21 @@ fn read_cycle_time_not_connected() {
 // ── read_cycle_time CPU-family dispatch (exercised without a network connection) ──
 
 #[test]
-fn read_cycle_time_s7300_profile_returns_unsupported_cpu_family() {
+fn read_cycle_time_s7300_profile_attempts_tis_path() {
+    // S7300/S7400 now dispatch to the experimental TIS TIMEMEAS path (crate::tis) instead
+    // of failing outright. Without a real connection this still fails, but with
+    // NotConnected (from read_cycle_time_tis's own connected-check) rather than
+    // UnsupportedCpuFamily — the family is no longer rejected up front.
     let mut c = S7Client::new();
     c.connect_profile = Some(CpuFamily::S7300);
-    assert!(matches!(
-        c.read_cycle_time(),
-        Err(S7Error::UnsupportedCpuFamily { .. })
-    ));
+    assert!(matches!(c.read_cycle_time(), Err(S7Error::NotConnected)));
 }
 
 #[test]
-fn read_cycle_time_s7400_profile_returns_unsupported_cpu_family() {
+fn read_cycle_time_s7400_profile_attempts_tis_path() {
     let mut c = S7Client::new();
     c.connect_profile = Some(CpuFamily::S7400);
-    assert!(matches!(
-        c.read_cycle_time(),
-        Err(S7Error::UnsupportedCpuFamily { .. })
-    ));
+    assert!(matches!(c.read_cycle_time(), Err(S7Error::NotConnected)));
 }
 
 #[test]

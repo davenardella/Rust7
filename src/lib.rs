@@ -3,6 +3,7 @@
 
 pub mod client;
 mod diag_events;
+mod tis;
 
 pub use client::{
     CpuFamily,
