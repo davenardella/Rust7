@@ -1,7 +1,9 @@
 // Private helpers are accessible to submodules via super::super (the client module).
-use super::super::{
-    build_szl_first_request, build_szl_next_request, parse_bcd_timestamp, SZL_REQ_LEN,
-};
+use super::super::{build_szl_first_request, build_szl_next_request, parse_bcd_timestamp};
+
+// SZL request telegrams are always 33 bytes (17-byte TPKT+COTP+S7 header + 8-byte
+// parameter block + 8-byte data block for FIRST, or 12+4 for NEXT).
+const SZL_REQ_LEN: usize = 33;
 use crate::{
     CpuFamily, CpuInfo, CycleTimeInfo, S7Client, S7DateTime, S7Error, Szl, SzlHeader,
     WorkMemoryRecord,

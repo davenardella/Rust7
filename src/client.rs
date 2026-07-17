@@ -74,13 +74,19 @@ pub const S7_SZL_CYCLE_TIME: u16 = 0x0194;
 /// Current CPU operating mode (RUN / STOP / STARTUP).
 pub const S7_SZL_CPU_STATUS: u16 = 0x0424;
 
+// Userdata (ROSCTR 0x07) request envelope — shared by every function group (SZL "CPU
+// functions", TIS "Programmer commands", …). Only the trailing data block differs per
+// function group. See docs/protocol/tis-timemeas.md for field-level citations.
+const USERDATA_HEADER_LEN: usize = TPKT_ISO_LEN + 10; // TPKT+COTP (7) + S7 userdata header (10)
+const USERDATA_METHOD_SHORT: u8 = 0x11; // first/single-shot request — no EXT continuation fields
+const USERDATA_METHOD_EXT: u8 = 0x12; // continuation request — adds 4 EXT bytes (dataUnitRef, lastDataUnit, errorCode)
+
 // SZL protocol internals
-const SZL_REQ_LEN: usize = 33; // SZL request telegram size (bytes)
-                               // Offsets within the S7 userdata **response** body (after the 7-byte TPKT/COTP header).
-                               // S7 userdata response header: 12 bytes (10-byte base + 2 error-class/code bytes).
-                               // Parameter block: 10 bytes starting at response[12].
-                               // Data block: starts at response[22].
-                               // Verified against moka7 / Snap7 (PDU[N] = response[N-7]).
+// Offsets within the S7 userdata **response** body (after the 7-byte TPKT/COTP header).
+// S7 userdata response header: 12 bytes (10-byte base + 2 error-class/code bytes).
+// Parameter block: 10 bytes starting at response[12].
+// Data block: starts at response[22].
+// Verified against moka7 / Snap7 (PDU[N] = response[N-7]).
 const SZL_SEQ_DONE_OFFSET: usize = 19; // last param byte: 0x00 = final/only fragment
 const SZL_DATA_RET_OFFSET: usize = 22; // data-block return code (0xFF = ok)
 const SZL_DATA_LEN_OFFSET: usize = 24; // data-block payload length (2 bytes, big-endian)
@@ -427,75 +433,93 @@ fn check_iso_packet(
     Ok(telegram_length - TPKT_ISO_LEN)
 }
 
-// Builds the 33-byte ROSCTR-0x07 Userdata "first" SZL read request telegram.
-fn build_szl_first_request(szl_id: u16, szl_index: u16) -> [u8; SZL_REQ_LEN] {
-    let mut req: [u8; SZL_REQ_LEN] = [
+// Builds a ROSCTR-0x07 Userdata request telegram: TPKT+COTP+S7 header, the userdata
+// parameter-item preamble (function/itemcount/item-type/item-length/method/type|group/
+// subfunc/seq-num, plus the 4 EXT continuation bytes when `method == USERDATA_METHOD_EXT`),
+// followed by the caller-supplied data block. This envelope is identical for every
+// function group (SZL "CPU functions" = 0x44, TIS "Programmer commands" = 0x41, …); only
+// the data block's contents are function-group-specific. See
+// docs/protocol/tis-timemeas.md for field-level citations against the Wireshark dissector
+// and the Apache PLC4X `s7.mspec`.
+fn build_userdata_request(
+    pdu_ref: u16,
+    method: u8,
+    type_group: u8,
+    subfunc: u8,
+    seq_num: u8,
+    data_block: &[u8],
+) -> Vec<u8> {
+    let ext = method == USERDATA_METHOD_EXT;
+    let param_len: u16 = if ext { 12 } else { 8 };
+    let data_len: u16 = data_block.len() as u16;
+    let total_len: u16 = (USERDATA_HEADER_LEN + param_len as usize + data_block.len()) as u16;
+
+    let mut req = Vec::with_capacity(total_len as usize);
+    req.extend_from_slice(&[
         ISO_ID,
-        0x00, // TPKT: version, reserved              0
-        0x00,
-        0x21, // TPKT: total length = 33              2
+        0x00, // TPKT: version, reserved
+        hi_part!(total_len),
+        lo_part!(total_len), // TPKT: total length
         0x02,
         0xF0,
-        EOT, // COTP: len, PDU type, EOT             4
+        EOT, // COTP: len, PDU type, EOT
         S7_ID,
-        0x07, // S7: protocol ID, ROSCTR = Userdata   7
+        0x07, // S7: protocol ID, ROSCTR = Userdata
         0x00,
-        0x00, // redundancy id                        9
-        0x11,
-        0x00, // PDU reference                        11
-        0x00,
-        0x08, // parameter length = 8                 13
-        0x00,
-        0x08, // data length = 8                      15
-        // --- Parameter block (8 bytes at 17–24) ---
-        0x00,
-        0x01,
-        0x12, // param header                         17
-        0x04, // sub-length = 4                       20
-        0x11, // method = request                     21
-        0x44, // type=4(req) | group=4(CPU)           22
-        0x01, // subfunction = ReadSZL                23
-        0x00, // sequence number = 0 (first)          24
-        // --- Data block (8 bytes at 25–32) ---
-        RES_SUCCESS, // data return code                     25
-        0x09,        // transport size = OCTET_STRING        26
-        0x00,
-        0x04, // data payload length = 4              27
-        0x00,
-        0x00, // SZL-ID (filled below)                29
-        0x00,
-        0x00, // SZL-INDEX (filled below)             31
-    ];
-    req[29] = hi_part!(szl_id);
-    req[30] = lo_part!(szl_id);
-    req[31] = hi_part!(szl_index);
-    req[32] = lo_part!(szl_index);
+        0x00, // redundancy id
+        hi_part!(pdu_ref),
+        lo_part!(pdu_ref), // PDU reference
+        hi_part!(param_len),
+        lo_part!(param_len), // parameter length
+        hi_part!(data_len),
+        lo_part!(data_len), // data length
+        // --- Parameter block ---
+        0x00, // function
+        0x01, // item count
+        0x12, // item type = S7ParameterUserDataItemCPUFunctions
+        if ext { 0x08 } else { 0x04 }, // item length (sub-length)
+        method,
+        type_group,
+        subfunc,
+        seq_num,
+    ]);
+    if ext {
+        req.extend_from_slice(&[0x00, 0x00, 0x00, 0x00]); // dataUnitRef, lastDataUnit, errorCode(2)
+    }
+    req.extend_from_slice(data_block);
     req
+}
+
+// Builds the 33-byte ROSCTR-0x07 Userdata "first" SZL read request telegram.
+fn build_szl_first_request(szl_id: u16, szl_index: u16) -> Vec<u8> {
+    let mut data_block = [
+        RES_SUCCESS, // data return code
+        0x09,        // transport size = OCTET_STRING
+        0x00,
+        0x04, // data payload length = 4
+        0x00,
+        0x00, // SZL-ID (filled below)
+        0x00,
+        0x00, // SZL-INDEX (filled below)
+    ];
+    data_block[4] = hi_part!(szl_id);
+    data_block[5] = lo_part!(szl_id);
+    data_block[6] = hi_part!(szl_index);
+    data_block[7] = lo_part!(szl_index);
+    build_userdata_request(0x0011, USERDATA_METHOD_SHORT, 0x44, 0x01, 0x00, &data_block)
 }
 
 // Builds the 33-byte ROSCTR-0x07 Userdata "next" SZL read request telegram.
 // `seq_num` must echo the sequence number the PLC returned in the previous response.
-fn build_szl_next_request(seq_num: u8) -> [u8; SZL_REQ_LEN] {
-    [
-        ISO_ID, 0x00, // TPKT: version, reserved              0
-        0x00, 0x21, // TPKT: total length = 33              2
-        0x02, 0xF0, EOT, // COTP                                 4
-        S7_ID, 0x07, // S7: protocol ID, ROSCTR = Userdata   7
-        0x00, 0x00, // redundancy id                        9
-        0x12, 0x00, // PDU reference                        11
-        0x00, 0x0C, // parameter length = 12                13
-        0x00, 0x04, // data length = 4                      15
-        // --- Parameter block (12 bytes at 17–28) ---
-        0x00, 0x01, 0x12,    // param header                         17
-        0x08,    // sub-length = 8                       20
-        0x12,    // method = continuation                21
-        0x44,    // type/group                           22
-        0x01,    // subfunction = ReadSZL                23
-        seq_num, // PLC sequence number (echo)           24
-        0x00, 0x00, 0x00, 0x00, // padding                              25
-        // --- Data block (4 bytes at 29–32) ---
-        0x0A, 0x00, 0x00, 0x00, //                                      29
-    ]
+fn build_szl_next_request(seq_num: u8) -> Vec<u8> {
+    build_userdata_request(
+        0x0012,
+        USERDATA_METHOD_EXT,
+        0x44,
+        0x01,
+        seq_num,
+        &[0x0A, 0x00, 0x00, 0x00],
+    )
 }
 
 // Decodes an 8-byte Siemens DATE_AND_TIME (DT) BCD timestamp.
